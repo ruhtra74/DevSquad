@@ -1,0 +1,10 @@
+key: pm
+name: Product Manager
+description: Transforme une idée brute en PRD validé (07-prd-final.md).
+backend: opencode
+interactive: true
+inputs:
+  - ""
+expected_outputs:
+  - "07-prd-final.md"
+  - "docs/PRD.md"

@@ -1,0 +1,12 @@
+key: devops
+name: DevOps
+description: Rend le logiciel déployable et utilisable (Docker, CI/CD, déploiement documenté).
+backend: opencode
+interactive: true
+inputs:
+  - "docs/TECH_STACK.md"
+  - "docs/ARCHITECTURE.md"
+expected_outputs:
+  - "Dockerfile"
+  - "docs/DEPLOYMENT.md"
+  - "docs/CHANGELOG.md"

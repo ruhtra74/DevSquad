@@ -1,0 +1,93 @@
+Metadata-Version: 2.4
+Name: agent-orchestrator
+Version: 0.1.0
+Summary: Orchestrateur d'agents IA : d'une idée à un logiciel testé, déployé et utilisable.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.0
+Requires-Dist: typer>=0.12
+Requires-Dist: jinja2>=3.1
+Requires-Dist: pyyaml>=6.0
+
+# Agent Orchestrator
+
+Pilote une **équipe d'agents IA** (via des CLI de coding existants : OpenCode, puis Claude Code / Aider) pour transformer **une idée en logiciel testé, déployé et utilisable**.
+
+## Pipeline
+
+```
+Idée → Product Manager → Architecte → Lead Manager → (Coder ↔ Tester)* → DevOps
+```
+
+| Agent | Rôle | Livrables |
+|---|---|---|
+| Product Manager | Idée → PRD validé | `07-prd-final.md`, `docs/PRD.md` |
+| Architecte | Découpe la solution en modules, conçoit, scaffolde | `docs/MODULES.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/TECH_STACK.md` |
+| Lead Manager | Modules → plan de travail sans chevauchement | `docs/TASKS.md`, `docs/TASKS.json`, `docs/BACKLOG.md` |
+| Coder | Implémente une tâche dans son périmètre | code + `docs/reports/TASK-NNN.md` |
+| Tester | Valide fonctionnellement (gate : `STATUT: PASS`) | `docs/reports/TASK-NNN-tests.md` |
+| DevOps | Rends déployable et utilisable | `Dockerfile`, `docs/DEPLOYMENT.md`, `docs/CHANGELOG.md` |
+
+**Boucle centrale** : Coder ↔ Tester tourne en boucle jusqu'à épuisement du backlog. Une tâche bloquée après 3 essais est marquée `BLOCKED`.
+
+## Installation
+
+```bash
+cd orchestrator
+pip install -e .
+```
+
+Prérequis utilisateur : Python 3.11+, Git, et au moins un backend CLI installé/configuré (OpenCode, avec ses skills dans `~/.agents/skills/`).
+
+## Utilisation
+
+```bash
+# Démarrer un projet à partir d'une idée (lance le PM, boucle interactive)
+orchestrator start "Une app de gestion de stock pour petit commerce"
+
+# Exécuter une seule étape
+orchestrator advance <project_id>
+
+# Reprendre un projet (boucle interactive jusqu'à l'arrêt)
+orchestrator resume <project_id>
+
+# État d'avancement
+orchestrator status <project_id>
+
+# Configurer un backend par agent
+orchestrator config set coder.backend dry     # backend simulé (test pipeline)
+orchestrator config set coder.backend opencode
+orchestrator config show
+```
+
+## Contrats entre agents
+
+- **Le Lead Manager ne re-découpe jamais les modules** : il travaille sur `docs/MODULES.md` de l'Architecte.
+- **Une tâche = un module + un livrable** : `docs/TASKS.json` garantit l'absence de chevauchement (chaque tâche pointe une `target` unique).
+- **Le Tester est un gate** : rien n'est `done` sans `STATUT: PASS` dans son rapport.
+- **L'interactivité est préservée** : chaque agent est lancé avec `opencode run --interactive`, les agents peuvent poser des questions via l'outil `question`.
+
+## Structure
+
+```
+orchestrator/
+├── agents/          # définitions des agents (YAML) — personnalisables
+├── backends/        # adaptateurs CLI (interface commune) : opencode, dry
+├── core/
+│   ├── state.py         # modèles Pydantic (ProjectState, Task, AgentRun)
+│   ├── state_store.py   # persistance SQLite (reprise fiable)
+│   ├── config.py        # configuration globale (JSON)
+│   ├── pipeline.py      # machine d'état PM→Architecte→Lead→Coder↔Tester→DevOps
+│   ├── scheduler.py     # helpers git worktree (parallélisme v2)
+│   └── orchestrator.py  # classe centrale
+├── prompts/         # templates Jinja2 par agent — personnalisables
+└── cli.py           # start, advance, resume, status, list, config, agents
+```
+
+L'état est stocké en **hybride** : SQLite (`orchestrator.db`) pour l'état technique + documents `.md`/`.json` dans `projects/<project_id>/` pour le contrat documentaire. On peut reprendre n'importe quand avec `resume`.
+
+## À venir
+
+- Backends Claude Code et Aider
+- Parallélisme (plusieurs Coder/Tester) via git worktrees
+- Multi-projets

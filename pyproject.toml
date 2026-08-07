@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-orchestrator"
+version = "0.1.0"
+description = "Orchestrateur d'agents IA : d'une idée à un logiciel testé, déployé et utilisable."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "typer>=0.12",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+orchestrator = "orchestrator.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["orchestrator*"]
+
+[tool.setuptools.package-data]
+"orchestrator" = ["py.typed"]
+"orchestrator.agents" = ["*.yaml"]
+"orchestrator.prompts" = ["*.j2"]

@@ -1,0 +1,100 @@
+# Orchestrateur d'agents IA — Résumé du projet
+
+## 1. Vision
+
+Un outil qui pilote une **équipe d'agents IA spécialisés**, chacun exécuté via un CLI de coding existant (OpenCode, Claude Code, Aider, ou autre), pour transformer **une idée en produit testé, déployé et utilisable**, sans que l'utilisateur ait à coder lui-même les étapes intermédiaires.
+
+Ce n'est pas une application à utiliser directement — c'est une **couche d'orchestration** au-dessus d'outils de coding agentique déjà existants, réutilisant des skills (fichiers `.md` + `.sh`) déjà éprouvés sur OpenCode.
+
+---
+
+## 2. Les 6 agents métier
+
+| # | Agent | Entrée | Objectif | Livrable | Handoff |
+|---|-------|--------|----------|----------|---------|
+| 1 | **Product Manager** | Idée brute | Transformer l'idée en PRD validé | `07-prd-final.md` (vision, users, features, critères d'acceptation) | → Architecte |
+| 2 | **Architecte** | PRD | Découper en modules, concevoir, scaffolder | `MODULES.md` (rôle, périmètre, frontières, interfaces, dépendances de chaque module), `ARCHITECTURE.md`, `DECISIONS.md`, `TECH_STACK.md`, projet scaffoldé | → Lead Manager |
+| 3 | **Lead Manager** | Modules + projet scaffoldé | Découper en tâches atomiques sans chevauchement, prioriser | `TASKS.md` (TASK-NNN, un module + un livrable par tâche), `BACKLOG.md`, `ROADMAP.md`, `PROJECT_STATUS.md`, `SESSION_LOG.md` | → produit consommé par l'Orchestrateur (ne dispatche plus lui-même) |
+| 4 | **Coder** | TASK-NNN + contexte (`AI_CONTEXT.md`, `MODULES.md`, `ARCHITECTURE.md`, `DEVELOPMENT_RULES.md`) | Implémenter strictement dans son périmètre | Code + rapport JSON (fichiers, dépendances, décisions, risques) | → Tester |
+| 5 | **Tester** | Code + rapport | Valider fonctionnellement (unitaire/intégration/E2E, critères d'acceptation du PRD) | Rapport de tests + bugs éventuels | ✅ validé / 🔁 renvoi au Coder |
+| 6 | **DevOps** | Tâches validées | Rendre le logiciel déployable | Dockerisation, CI/CD, environnements dev/staging/prod, monitoring, `CHANGELOG.md` | → utilisateur final |
+
+**Boucle centrale** : Coder ↔ Tester tourne en boucle (parallélisable sur plusieurs tâches indépendantes) jusqu'à épuisement du backlog produit par le Lead Manager.
+
+---
+
+## 3. L'Orchestrateur général
+
+**Décision retenue : Option B** — un orchestrateur unique qui pilote **tout** le pipeline (les 6 agents), et pas seulement l'exécution technique.
+
+**Pourquoi ce choix** : pour les gros projets qui s'étalent sur de longues périodes, il faut **un seul point de vérité** sur l'état du projet, capable de reprendre exactement où on s'est arrêté (même après plusieurs semaines). Répartir l'état entre le Lead Manager et un orchestrateur séparé (Option A, écartée) créait un risque de désynchronisation entre deux sources de vérité.
+
+**Rôle de l'Orchestrateur :**
+- Pilote la séquence complète : PM → Architecte → Lead Manager → (Coder ↔ Tester)\* → DevOps
+- Applique les gates (ex : pas de "done" sans tests verts)
+- Route la communication et les livrables entre agents
+- Choisit et lance le backend CLI approprié pour chaque agent (OpenCode / Claude Code / Aider)
+- Gère le parallélisme (plusieurs Coder/Tester simultanés sur des tâches indépendantes)
+- **Persiste l'état après chaque étape** → permet la reprise fiable à tout moment
+- Gère l'isolation entre agents qui codent en parallèle via **git worktrees**
+
+Le Lead Manager reste un agent à part entière (compétence métier : découpage en tâches, anti-chevauchement, priorisation), mais il est désormais **appelé par** l'Orchestrateur plutôt que de dispatcher lui-même.
+
+**Hypothèses retenues (à confirmer/ajuster plus tard) :**
+- État stocké en **hybride** : documents lisibles par les agents (PRD, MODULES.md, TASKS.md...) + state store technique (SQLite/JSON) géré par l'Orchestrateur
+- **Un projet à la fois** pour la première version (extensible plus tard au multi-projets)
+- Isolation du parallélisme via **git worktrees**
+
+---
+
+## 4. Architecture technique retenue
+
+**Stack :** Python 3.11+, `asyncio` (parallélisme), `pydantic` (modèles d'état), `typer` (CLI), `SQLite` (persistance), `Jinja2` (templating des prompts), `subprocess`/`asyncio.create_subprocess_exec` (pilotage des CLI externes).
+
+**Structure du projet :**
+```
+orchestrator/
+├── agents/          # définitions d'agents (YAML), indépendantes du backend
+├── backends/        # adaptateurs OpenCode / Claude Code / Aider (interface commune)
+├── core/
+│   ├── state.py         # modèles Pydantic (ProjectState, Task, AgentRun)
+│   ├── state_store.py   # persistence SQLite + docs
+│   ├── pipeline.py      # state machine du pipeline complet
+│   ├── scheduler.py     # exécution parallèle + isolation git worktree
+│   └── orchestrator.py  # classe centrale
+├── prompts/         # templates Jinja2 par agent
+├── cli.py           # commandes `start`, `resume`, `status`
+└── projects/         # un dossier par projet géré (state + docs + code)
+```
+
+**Principe clé de conversion des skills existants :** chaque skill `.md`+`.sh` devient une définition d'agent YAML (rôle, template de prompt, inputs attendus, schéma de sortie JSON) + les scripts `.sh` deviennent soit des outils appelés par l'agent, soit des étapes du backend adapter.
+
+---
+
+## 5. Utilisation de l'outil une fois terminé
+
+Une fois développé, l'outil s'utilisera comme un **CLI Python installable localement**, avec ces prérequis côté utilisateur :
+
+**Prérequis à installer sur la machine :**
+- Python 3.11+ et l'outil lui-même (`pip install` depuis un package, ou clone + install en mode dev)
+- Git (pour les worktrees)
+- Au moins un des backends CLI supportés déjà installé et configuré avec ses propres accès (OpenCode, Claude Code, et/ou Aider), chacun avec sa clé API/config habituelle
+
+**Usage typique :**
+```bash
+# Démarrer un nouveau projet à partir d'une idée
+orchestrator start "Une app de gestion de stock pour petit commerce"
+
+# Reprendre un projet en cours (même après plusieurs semaines)
+orchestrator resume <project_id>
+
+# Consulter l'état d'avancement
+orchestrator status <project_id>
+
+# Configurer quel backend utiliser par agent (fichier de config ou flag)
+orchestrator config set coder.backend=claude_code
+```
+
+**Ce que l'utilisateur récupère :** un dossier `projects/<project_id>/` contenant tous les documents produits (PRD, architecture, backlog), le code source du produit, et — une fois le pipeline DevOps passé — un environnement déployé et utilisable (pipeline CI/CD, conteneurs, etc.), sans avoir eu à écrire de code lui-même.
+
+**Ce que l'outil ne fait pas à la place de l'utilisateur** : il ne remplace pas la nécessité d'avoir les CLI backends déjà installés/configurés ni un environnement de déploiement cible (ex : accès à un serveur/cloud) — l'Orchestrateur pilote ces outils, il ne les substitue pas.

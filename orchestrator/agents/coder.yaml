@@ -1,0 +1,12 @@
+key: coder
+name: Coder
+description: Implémente une tâche strictement dans son périmètre, produit son rapport.
+backend: opencode
+interactive: true
+inputs:
+  - "docs/AI_CONTEXT.md"
+  - "docs/MODULES.md"
+  - "docs/ARCHITECTURE.md"
+  - "docs/DEVELOPMENT_RULES.md"
+expected_outputs:
+  - "docs/reports/{task_id}.md"

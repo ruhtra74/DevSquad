@@ -1,0 +1,11 @@
+key: lead_manager
+name: Lead Manager
+description: Transforme les modules en plan de travail codable sans chevauchement (TASKS.md + TASKS.json).
+backend: opencode
+interactive: true
+inputs:
+  - "docs/MODULES.md"
+expected_outputs:
+  - "docs/TASKS.md"
+  - "docs/TASKS.json"
+  - "docs/BACKLOG.md"

@@ -1,0 +1,9 @@
+key: tester
+name: Tester
+description: Valide fonctionnellement une tâche, produit le rapport de tests avec verdict.
+backend: opencode
+interactive: true
+inputs:
+  - "docs/reports/{task_id}.md"
+expected_outputs:
+  - "docs/reports/{task_id}-tests.md"
