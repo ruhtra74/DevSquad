@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from .base import Backend, RunResult, RunSpec
@@ -37,13 +38,36 @@ class OpenCodeBackend(Backend):
 
         log_file = open(log_path, "w")
         env = {**os.environ, "PWD": spec.cwd}
+        capture = spec.capture and not spec.interactive
+        captured: list[str] = []
+
+        def _pump():
+            """Relit stdout ligne à ligne : écrit le log en direct ET accumule la sortie."""
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    log_file.write(line)
+                    log_file.flush()
+                    captured.append(line)
+            except (ValueError, OSError):
+                pass
+
         try:
             if spec.interactive:
                 proc = subprocess.Popen(cmd, cwd=spec.cwd, env=env)
+                pump = None
+            elif capture:
+                proc = subprocess.Popen(
+                    cmd, cwd=spec.cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                pump = threading.Thread(target=_pump, daemon=True)
+                pump.start()
             else:
                 proc = subprocess.Popen(
                     cmd, cwd=spec.cwd, env=env, stdout=log_file, stderr=subprocess.STDOUT
                 )
+                pump = None
             try:
                 if spec.timeout_seconds:
                     proc.wait(timeout=spec.timeout_seconds)
@@ -55,16 +79,22 @@ class OpenCodeBackend(Backend):
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                if pump is not None:
+                    pump.join(timeout=5)
                 return RunResult(
                     exit_code=-1,
                     success=False,
                     error=f"timeout après {spec.timeout_seconds}s",
                     log_path=log_path,
+                    output="".join(captured),
                 )
+            if pump is not None:
+                pump.join(timeout=5)
             return RunResult(
                 exit_code=proc.returncode,
                 success=proc.returncode == 0,
                 log_path=log_path,
+                output="".join(captured),
             )
         finally:
             log_file.close()

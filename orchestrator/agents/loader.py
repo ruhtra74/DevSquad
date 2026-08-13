@@ -14,6 +14,7 @@ class AgentDefinition:
     description: str
     backend: str = "opencode"
     interactive: bool = True
+    asks_questions: bool = False  # si True : pose des questions à l'utilisateur → reste interactif même en quiet
     inputs: list[str] = field(default_factory=list)
     expected_outputs: list[str] = field(default_factory=list)
 

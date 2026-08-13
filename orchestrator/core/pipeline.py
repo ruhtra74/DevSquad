@@ -18,7 +18,8 @@ class Pipeline:
         self.agents = agents
         self.env = Environment(loader=FileSystemLoader(str(prompts_dir)))
 
-    def render_prompt(self, agent_key: AgentKey, state: ProjectState, task: Optional[Task]) -> str:
+    def render_prompt(self, agent_key: AgentKey, state: ProjectState, task: Optional[Task],
+                      mode: Optional[str] = None) -> str:
         tpl = self.env.get_template(f"{agent_key.value}.j2")
         return tpl.render(
             project_name=state.name,
@@ -26,11 +27,18 @@ class Pipeline:
             idea=state.idea,
             prd_path=state.prd_path or "docs/PRD.md",
             task=task,
+            mode=mode,
         )
 
     def next_step(self, state: ProjectState) -> Tuple[Optional[AgentKey], Optional[Task]]:
         phase = state.phase
         if phase == Phase.IDEA:
+            return AgentKey.PM, None
+        if phase == Phase.QUESTIONS:
+            # Le PM poursuit : soit il pose de nouvelles questions (entrevue),
+            # soit il livre le PRD. Le mode exact est déterminé par les fichiers
+            # présents dans _run (voir _pm_mode). L'outil intercepte la phase
+            # QUESTIONS pour poser les questions à l'utilisateur quand nécessaire.
             return AgentKey.PM, None
         if phase == Phase.PRD_DONE:
             return AgentKey.ARCHITECT, None
@@ -60,9 +68,17 @@ class Pipeline:
 
     def apply_result(self, state: ProjectState, agent_key: AgentKey, task: Optional[Task], success: bool) -> None:
         if agent_key == AgentKey.PM:
-            if success:
+            if not success:
+                state.updated_at = now()
+                return
+            # Entre vue terminée (02-interview.md) mais PRD pas encore livré :
+            # on passe en QUESTIONS pour que l'utilisateur confirme, puis le PM
+            # relancera en livraison. Si le PRD existe déjà : PRD_DONE.
+            if (Path(state.path) / "07-prd-final.md").exists():
                 state.phase = Phase.PRD_DONE
                 state.prd_path = "07-prd-final.md"
+            else:
+                state.phase = Phase.QUESTIONS
         elif agent_key == AgentKey.ARCHITECT:
             if success:
                 state.phase = Phase.ARCHITECTURE_DONE

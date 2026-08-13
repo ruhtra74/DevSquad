@@ -23,6 +23,7 @@ class AgentKey(str, enum.Enum):
 
 class Phase(str, enum.Enum):
     IDEA = "idea"
+    QUESTIONS = "questions"  # agent posant des questions : en attente des réponses utilisateur
     PRD_DONE = "prd_done"
     ARCHITECTURE_DONE = "architecture_done"
     PLANNING_DONE = "planning_done"

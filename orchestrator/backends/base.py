@@ -13,8 +13,9 @@ class RunSpec:
     cwd: str
     interactive: bool = True
     auto_approve: bool = False
-    timeout_seconds: Optional[int] = 14400
+    timeout_seconds: Optional[int] = 1800
     expected_outputs: list[str] = field(default_factory=list)  # contrat documentaire
+    capture: bool = False  # capturer la sortie (non-interactif) pour la réutiliser
 
 
 @dataclass
@@ -23,6 +24,7 @@ class RunResult:
     success: bool
     error: Optional[str] = None
     log_path: Optional[str] = None
+    output: str = ""  # sortie stdout capturée (si capture=True)
 
 
 class Backend(ABC):

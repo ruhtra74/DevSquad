@@ -35,3 +35,4 @@ orchestrator/prompts/devops.j2
 orchestrator/prompts/lead_manager.j2
 orchestrator/prompts/pm.j2
 orchestrator/prompts/tester.j2
+tests/test_cli_projects.py

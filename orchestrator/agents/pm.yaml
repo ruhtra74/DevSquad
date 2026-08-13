@@ -3,6 +3,7 @@ name: Product Manager
 description: Transforme une idée brute en PRD validé (07-prd-final.md).
 backend: opencode
 interactive: true
+asks_questions: true
 inputs:
   - ""
 expected_outputs:

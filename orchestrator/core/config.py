@@ -9,6 +9,7 @@ DEFAULTS: dict[str, Any] = {
     "root": None,  # résolu vers ~/.config/orchestrator si non défini
     "max_parallel": 1,
     "auto_approve": False,
+    "quiet": True,  # si True : les agents tournent en arrière-plan (indicateur + résultat, pas de stream)
     "backends": {
         "pm": "opencode",
         "architect": "opencode",
@@ -19,6 +20,14 @@ DEFAULTS: dict[str, Any] = {
     },
     "agents_dir": None,
     "prompts_dir": None,
+    "timeouts": {  # secondes par agent (défaut 1800 = 30 min)
+        "pm": 1800,
+        "architect": 1800,
+        "lead_manager": 1800,
+        "coder": 1800,
+        "tester": 1800,
+        "devops": 1800,
+    },
 }
 
 

@@ -45,7 +45,62 @@ class DryBackend(Backend):
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 continue
-            if rel.endswith("docs/TASKS.json"):
+            if rel == "docs/clarify-questions.json":
+                target.write_text(json.dumps({
+                    "questions": [
+                        {
+                            "header": "Cible",
+                            "question": "Qui est l'utilisateur principal au départ ?",
+                            "options": [
+                                {"label": "Particuliers", "description": "Le grand public"},
+                                {"label": "Entreprises", "description": "B2B"},
+                                {"label": "Mixte", "description": "Les deux"},
+                            ],
+                            "multiple": False,
+                        }
+                    ]
+                }, indent=2))
+            elif rel == "docs/interview-questions.json":
+                target.write_text(json.dumps({
+                    "questions": [
+                        {
+                            "header": "Périmètre",
+                            "question": "Faut-il prévoir une version mobile ?",
+                            "options": [
+                                {"label": "Oui, natif", "description": "iOS + Android"},
+                                {"label": "Oui, web mobile", "description": "Responsive"},
+                                {"label": "Non", "description": "Desktop uniquement"},
+                            ],
+                            "multiple": False,
+                        },
+                        {
+                            "header": "Monétisation",
+                            "question": "Quel modèle économique ?",
+                            "options": [
+                                {"label": "Abonnement", "description": "Récurrent"},
+                                {"label": "Commission", "description": "Par transaction"},
+                                {"label": "Freemium", "description": "Gratuit + options"},
+                            ],
+                            "multiple": False,
+                        },
+                    ]
+                }, indent=2))
+            elif rel == "docs/decisions-questions.json":
+                target.write_text(json.dumps({
+                    "questions": [
+                        {
+                            "header": "Contradiction marché",
+                            "question": "L'étude recommande X plutôt que Y car les concurrents leaders utilisent X. Gardes-tu ton choix ou adoptes-tu la recommandation ?",
+                            "options": [
+                                {"label": "Garder mon choix", "description": "Je maintiens ma décision"},
+                                {"label": "Adopter la recommandation", "description": "Je suis l'étude de marché"},
+                                {"label": "Compromis", "description": "Je combine les deux"},
+                            ],
+                            "multiple": False,
+                        }
+                    ]
+                }, indent=2))
+            elif rel.endswith("docs/TASKS.json"):
                 target.write_text(json.dumps({"tasks": _SAMPLE_TASKS}, indent=2))
             elif rel.endswith("-tests.md"):
                 target.write_text("STATUT: PASS\n\nTous les tests passent.\n")
