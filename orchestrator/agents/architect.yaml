@@ -1,8 +1,9 @@
 key: architect
 name: Architecte
-description: Découpe la solution en modules (MODULES.md), conçoit l'architecture puis scaffolde.
+description: Découpe la solution en modules (MODULES.md), conçoit l'architecture, pose les questions de configuration du projet (projet-initializer) puis scaffolde.
 backend: opencode
 interactive: true
+asks_questions: true
 inputs:
   - "docs/PRD.md"
 expected_outputs:

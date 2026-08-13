@@ -72,3 +72,22 @@ def test_dry_pipeline_full_pm_flow(tmp_path):
     assert (Path(state.path) / "07-prd-final.md").exists()
     assert (Path(state.path) / "docs" / "PRD.md").exists()
     assert orch.store.get(state.id).phase.value == "prd_done"
+
+    # 5. architecte — mode config : questions de configuration, phase ARCH_QUESTIONS
+    s = orch.advance(state.id)
+    assert s.status == "succeeded"
+    assert (Path(state.path) / "docs" / "architect-questions.json").exists()
+    assert orch.store.get(state.id).phase.value == "arch_questions"
+
+    # L'outil pose les questions de l'architecte -> réponses
+    s = orch.advance(state.id)
+    assert s.status == "questions"
+    assert orch._pending_questions_file(state) == "docs/architect-questions.json"
+    _answer(orch, state)
+
+    # 6. architecte — mode init : livrables d'architecture, phase architecture_done
+    s = orch.advance(state.id)
+    assert s.status == "succeeded"
+    assert (Path(state.path) / "docs" / "MODULES.md").exists()
+    assert (Path(state.path) / "docs" / "ARCHITECTURE.md").exists()
+    assert orch.store.get(state.id).phase.value == "architecture_done"

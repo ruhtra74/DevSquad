@@ -85,6 +85,30 @@ class DryBackend(Backend):
                         },
                     ]
                 }, indent=2))
+            elif rel == "docs/architect-questions.json":
+                target.write_text(json.dumps({
+                    "questions": [
+                        {
+                            "header": "Scaffolding",
+                            "question": "Veux-tu lancer le scaffolding réel ou seulement créer l'arborescence manuellement ?",
+                            "options": [
+                                {"label": "Oui, lancer le scaffolding", "description": "Exécute les commandes de scaffolding"},
+                                {"label": "Non, juste l'arborescence", "description": "Seulement les dossiers et fichiers de base"},
+                            ],
+                            "multiple": False,
+                        },
+                        {
+                            "header": "Architecture",
+                            "question": "Quelle architecture pour le code ?",
+                            "options": [
+                                {"label": "Hexagonale (ports & adapters)", "description": "Architecture hexagonale"},
+                                {"label": "En couches (layered)", "description": "Controller/service/repository"},
+                                {"label": "Aucune", "description": "Structure par défaut"},
+                            ],
+                            "multiple": False,
+                        },
+                    ]
+                }, indent=2))
             elif rel == "docs/decisions-questions.json":
                 target.write_text(json.dumps({
                     "questions": [

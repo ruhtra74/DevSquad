@@ -25,6 +25,7 @@ class Phase(str, enum.Enum):
     IDEA = "idea"
     QUESTIONS = "questions"  # agent posant des questions : en attente des réponses utilisateur
     PRD_DONE = "prd_done"
+    ARCH_QUESTIONS = "arch_questions"  # l'architecte pose des questions (configuration du projet)
     ARCHITECTURE_DONE = "architecture_done"
     PLANNING_DONE = "planning_done"
     DEVELOPMENT = "development"

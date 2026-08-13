@@ -42,7 +42,10 @@ def build_orchestrator() -> Orchestrator:
 
 def _report(step: StepResult) -> None:
     if step.status == "succeeded":
-        typer.secho(f"[OK] {step.agent} terminé.", fg="green", bold=True)
+        if step.agent:
+            typer.secho(f"[OK] {step.agent} terminé.", fg="green", bold=True)
+        else:
+            typer.secho("[OK]", fg="green", bold=True)
     elif step.status == "failed":
         typer.secho(f"[ÉCHEC] {step.agent}.", fg="red", bold=True)
     elif step.status == "blocked":
@@ -68,8 +71,56 @@ def _loop(orch: Orchestrator, project_id: str) -> None:
             continue
         if step.status != "succeeded":
             return
+        _review_step(orch, project_id, step)
         if not typer.confirm("Continuer avec l'étape suivante ?", default=True):
             return
+
+
+def _review_step(orch: Orchestrator, project_id: str, step: StepResult) -> None:
+    """Entre deux agents : affiche le résumé de l'agent, les fichiers produits
+    (numérotés) et propose de les consulter avant de passer à la suite."""
+    typer.secho("")
+    typer.secho(f"Résumé de l'agent ({step.agent}):", fg="cyan", bold=True)
+    summary = (step.summary or step.message or "").strip()
+    if summary:
+        typer.echo("  " + summary.replace("\n", "\n  "))
+    files = step.files or []
+    if files:
+        typer.secho("")
+        typer.secho("Fichiers de documentation créés :", fg="cyan", bold=True)
+        for i, f in enumerate(files, 1):
+            typer.echo(f"  {i}. {f}")
+        typer.echo("")
+        while True:
+            raw = typer.prompt("Voir un fichier (numéro), ou Entrée pour continuer", default="").strip()
+            if not raw:
+                break
+            if raw.isdigit() and 1 <= int(raw) <= len(files):
+                state = orch.store.get(project_id)
+                if state:
+                    _view_file(Path(state.path) / files[int(raw) - 1])
+            else:
+                typer.secho(f"Numéro invalide (1-{len(files)}).", fg="yellow")
+    typer.secho("")
+
+
+def _view_file(path: Path) -> None:
+    """Affiche un fichier : éditeur par défaut ($EDITOR) sinon less/cat."""
+    if not path.exists():
+        typer.secho(f"Fichier introuvable : {path}", fg="yellow")
+        return
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    try:
+        if editor:
+            subprocess.run([editor, str(path)], check=False)
+        else:
+            pager = "less" if shutil.which("less") else "cat"
+            subprocess.run([pager, str(path)], check=False)
+    except (OSError, ValueError):
+        try:
+            typer.echo(path.read_text())
+        except OSError as e:
+            typer.secho(f"Lecture impossible : {e}", fg="yellow")
 
 
 def _collect_answers(orch: Orchestrator, project_id: str) -> None:
@@ -96,11 +147,15 @@ def _collect_answers(orch: Orchestrator, project_id: str) -> None:
 
     questions = data.get("questions", []) if isinstance(data, dict) else data
     if not isinstance(questions, list) or not questions:
-        typer.secho("Aucune question trouvée dans le fichier.", fg="yellow")
+        # Liste vide : l'agent n'a rien à demander, on débloque la phase.
+        answers_path.parent.mkdir(parents=True, exist_ok=True)
+        answers_path.write_text(json.dumps({"answers": []}, indent=2, ensure_ascii=False))
+        typer.secho("Aucune question à poser, reprise du pipeline.", fg="green")
         return
 
     typer.secho("")
-    typer.secho("Le Product Manager te pose quelques questions :", fg="cyan", bold=True)
+    who = "L'Architecte" if "architect" in rel else "Le Product Manager"
+    typer.secho(f"{who} te pose quelques questions :", fg="cyan", bold=True)
     answers: list[dict] = []
     for i, q in enumerate(questions, 1):
         header = q.get("header", "Question")
@@ -373,6 +428,39 @@ def advance(
     orch = build_orchestrator()
     resolved_project_id = _resolve_project_id(project_id, project_id_option)
     _report(orch.advance(resolved_project_id))
+
+
+@app.command()
+def reset(
+    project_id: Optional[str] = typer.Argument(None, help="Identifiant du projet."),
+    project_id_option: Optional[str] = typer.Option(None, "--project-id", "-p", help="Identifiant du projet."),
+    to: str = typer.Option(..., "--to", "-t", help="Phase cible : idea, prd_done, arch_questions, architecture_done, planning_done, development."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Ne pas demander confirmation."),
+):
+    """Réinitialise un projet à une phase précise (supprime les livrables des phases suivantes).
+
+    Permet de re-tester une étape du pipeline plusieurs fois sur le même projet.
+    Exemples :
+      orchestrator reset stockpro --to prd_done     # rejouer l'architecte
+      orchestrator reset stockpro --to idea          # rejouer le PM
+      orchestrator reset stockpro --to architecture_done   # rejouer le Lead Manager
+    """
+    orch = build_orchestrator()
+    resolved_project_id = _resolve_project_id(project_id, project_id_option)
+    state = orch.store.get(resolved_project_id)
+    if state is None:
+        raise typer.BadParameter(f"Projet inconnu : {resolved_project_id}")
+    if not yes:
+        current = state.phase.value
+        confirm = typer.confirm(
+            f"Réinitialiser '{state.name}' ({resolved_project_id}) de '{current}' vers '{to}' ? "
+            "Les livrables des phases suivantes seront supprimés.",
+            default=False,
+        )
+        if not confirm:
+            typer.echo("Annulé.")
+            return
+    _report(orch.reset(resolved_project_id, to))
 
 
 @app.command()

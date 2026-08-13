@@ -39,6 +39,7 @@ Toutes les commandes acceptent `<project_id>` en argument positionnel **ou** via
 | `start <idée>` | **Démarre un nouveau projet** à partir d'une idée brute. Propose des noms générés par IA (ou via `--name`), choisit le chemin (ou via `--path`), crée le projet puis lance le pipeline. |
 | `advance <project_id>` | **Exécute une seule étape** du pipeline puis s'arrête. |
 | `resume <project_id>` | **Reprend un projet** là où il s'est arrêté, en boucle interactive (s'arrête quand on le lui demande ou si une étape échoue). |
+| `reset <project_id> --to <phase>` | **Réinitialise un projet à une phase précise** (supprime les livrables des phases suivantes). Utile pour re-tester une étape plusieurs fois sur le même projet. |
 | `status <project_id>` | **Affiche l'état** d'un projet : phase, chemin, détail des tâches et du dernier run. |
 | `list` / `projects` | **Liste les projets** gérés avec leur identifiant, phase et nom. |
 | `rm <project_id>` | **Supprime un projet** (état SQLite + dossier projet). Demande confirmation sauf avec `--yes` / `-y`. |
@@ -59,6 +60,12 @@ orchestrator advance <project_id>
 
 # Reprendre un projet (boucle interactive jusqu'à l'arrêt)
 orchestrator resume <project_id>
+
+# Réinitialiser un projet à une phase précise (pour re-tester une étape)
+orchestrator reset <project_id> --to prd_done     # rejouer l'architecte
+orchestrator reset <project_id> --to idea          # rejouer le PM
+orchestrator reset <project_id> --to architecture_done  # rejouer le Lead Manager
+orchestrator reset <project_id> --to prd_done --yes      # sans confirmation
 
 # État d'avancement
 orchestrator status <project_id>
@@ -81,6 +88,7 @@ orchestrator config show
 
 - `start --dry` : backend simulé pour valider le pipeline de bout en bout sans coût ni réseau.
 - `rm --yes` / `-y` : supprime sans demander confirmation.
+- `reset --yes` / `-y` : réinitialise sans demander confirmation. Phases cibles : `idea`, `prd_done`, `arch_questions`, `architecture_done`, `planning_done`, `development`.
 - `--project-id <id>` / `-p <id>` : passer l'identifiant de projet en option (ex : `advance -p monapp`) au lieu d'en argument positionnel.
 
 ### Clés de configuration (`orchestrator config`)

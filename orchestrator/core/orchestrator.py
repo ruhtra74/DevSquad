@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import threading
 import time
@@ -25,6 +26,8 @@ class StepResult:
     agent: Optional[str] = None
     task_id: Optional[str] = None
     message: str = ""
+    summary: str = ""  # résumé rédigé par l'agent (dernière réponse)
+    files: list = None  # fichiers produits par le run (livrables documentaires)
 
 
 def slugify(text: str) -> str:
@@ -116,6 +119,36 @@ def _line_label(line: str) -> Optional[str]:
     if part.get("type") != "tool":
         return None
     return _activity_label(part)
+
+
+def _summary_from_log(log_path: str) -> str:
+    """Extrait la dernière réponse texte de l'agent depuis le log JSON d'un run.
+
+    Le log OpenCode (format JSON) contient une séquence d'événements ; la
+    dernière part de type "text" de l'assistant est son message final, que
+    l'on affiche comme résumé. Retourne "" si rien d'exploitable (backend dry).
+    """
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    last = ""
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = evt.get("part") or {}
+        if part.get("type") != "text":
+            continue
+        text = (part.get("text") or part.get("content") or "").strip()
+        if text:
+            last = text
+    return last
 
 
 def _spinner(stop_event: threading.Event, label_fn) -> None:
@@ -219,6 +252,16 @@ class Orchestrator:
                     message=f"Le Product Manager attend tes réponses ({pending}).",
                 )
 
+        # Phase ARCH_QUESTIONS : idem pour l'architecte (questions de configuration).
+        if agent_key == AgentKey.ARCHITECT and state.phase == Phase.ARCH_QUESTIONS:
+            pending = self._pending_questions_file(state)
+            if pending:
+                return StepResult(
+                    status="questions",
+                    agent=agent_key.value,
+                    message=f"L'architecte attend tes réponses ({pending}).",
+                )
+
         return self._run(state, agent_key, task)
 
     def _pending_questions_file(self, state: ProjectState) -> Optional[str]:
@@ -228,6 +271,7 @@ class Orchestrator:
             "docs/clarify-questions.json",
             "docs/interview-questions.json",
             "docs/decisions-questions.json",
+            "docs/architect-questions.json",
         ]
         for rel in candidates:
             q = docs / Path(rel).name
@@ -265,6 +309,143 @@ class Orchestrator:
             return "research"
         return "prd"
 
+    def _architect_mode(self, state: ProjectState) -> str:
+        """Détermine le mode de l'architecte selon les fichiers déjà produits.
+
+        - "config": pose les questions de configuration du projet
+          (docs/architect-questions.json) — première passe, l'architecte
+          extrait du PRD ce qui est déjà décidé et ne demande que le reste.
+        - "init": lit les réponses (docs/architect-answers.json), découpe en
+          modules, conçoit puis scaffold le projet.
+        """
+        docs = Path(state.path) / "docs"
+        if not (docs / "architect-questions.json").exists():
+            return "config"
+        return "init"
+
+    # ---- réinitialisation ----
+
+    _RESET_TARGETS = ("idea", "prd_done", "arch_questions", "architecture_done",
+                      "planning_done", "development")
+
+    def reset(self, project_id: str, to: str) -> StepResult:
+        """Réinitialise un projet à une phase précise : les livrables produits
+        APRÈS cette phase sont supprimés (fichiers et dossiers), l'état technique
+        (phase, prd_path, modules_path, tasks) est ramené à ce qu'il était à
+        cette phase. Permet de re-tester une étape plusieurs fois sur le même
+        projet (ex: revenir à prd_done pour rejouer l'architecte).
+
+        Phases acceptées : idea, prd_done, arch_questions, architecture_done,
+        planning_done, development.
+        """
+        state = self.store.get(project_id)
+        if state is None:
+            return StepResult(status="noop", message=f"Projet inconnu : {project_id}")
+        if to not in self._RESET_TARGETS:
+            return StepResult(
+                status="failed",
+                message=f"Phase cible invalide : {to} (choix : {', '.join(self._RESET_TARGETS)})",
+            )
+
+        base = Path(state.path)
+        removed: list[str] = []
+
+        def _rm(rel: str) -> None:
+            p = base / rel
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(rel + "/")
+            elif p.exists():
+                p.unlink()
+                removed.append(rel)
+
+        # Livrables du PM : tous les fichiers de la phase PRD, réponses incluses.
+        pm_docs = [
+            "01-idea.md", "02-interview.md", "03-structure.md", "04-research.md",
+            "05-prd.md", "06-review.md", "07-prd-final.md",
+            "docs/PRD.md",
+            "docs/clarify-questions.json", "docs/clarify-answers.json",
+            "docs/interview-questions.json", "docs/interview-answers.json",
+            "docs/decisions-questions.json", "docs/decisions-answers.json",
+        ]
+        # Livrables de l'architecte : questions/réponses + architecture + scaffolding.
+        arch_docs = [
+            "docs/architect-questions.json", "docs/architect-answers.json",
+            "docs/MODULES.md", "docs/TECH_STACK.md", "docs/ARCHITECTURE.md",
+            "docs/DECISIONS.md", "docs/QUESTIONS.md",
+        ]
+        arch_dirs = ["backend", "frontend", "diagrams", "research", "references"]
+        # Livrables du Lead Manager.
+        lead_docs = ["docs/TASKS.md", "docs/TASKS.json", "docs/BACKLOG.md"]
+        # Rapports coder/tester + livrables DevOps.
+        reports_dir = "docs/reports"
+        devops_docs = ["Dockerfile", "docs/DEPLOYMENT.md", "docs/CHANGELOG.md"]
+
+        if to == "idea":
+            for rel in pm_docs + arch_docs + lead_docs + devops_docs:
+                _rm(rel)
+            for d in arch_dirs:
+                _rm(d)
+            _rm(reports_dir)
+            _rm(".git")
+            _rm("README.md")
+            state.phase = Phase.IDEA
+            state.prd_path = None
+            state.modules_path = None
+            state.tasks = []
+        elif to == "prd_done":
+            for rel in arch_docs + lead_docs + devops_docs:
+                _rm(rel)
+            for d in arch_dirs:
+                _rm(d)
+            _rm(reports_dir)
+            _rm(".git")
+            _rm("README.md")
+            state.phase = Phase.PRD_DONE
+            state.prd_path = "07-prd-final.md"
+            state.modules_path = None
+            state.tasks = []
+        elif to == "arch_questions":
+            # On garde les questions posées, on supprime les réponses et tout le reste.
+            for rel in arch_docs + lead_docs + devops_docs:
+                if rel != "docs/architect-questions.json":
+                    _rm(rel)
+            for d in arch_dirs:
+                _rm(d)
+            _rm(reports_dir)
+            _rm(".git")
+            _rm("README.md")
+            state.phase = Phase.ARCH_QUESTIONS
+            state.modules_path = None
+            state.tasks = []
+        elif to == "architecture_done":
+            for rel in lead_docs + devops_docs:
+                _rm(rel)
+            _rm(reports_dir)
+            state.phase = Phase.ARCHITECTURE_DONE
+            state.modules_path = "docs/MODULES.md"
+            state.tasks = []
+        elif to == "planning_done":
+            for rel in devops_docs:
+                _rm(rel)
+            _rm(reports_dir)
+            state.phase = Phase.PLANNING_DONE
+            state.tasks = []
+        elif to == "development":
+            for rel in devops_docs:
+                _rm(rel)
+            _rm(reports_dir)
+            state.phase = Phase.DEVELOPMENT
+            for t in state.tasks:
+                t.status = TaskStatus.TODO
+                t.attempts = 0
+                t.report = None
+
+        state.updated_at = now()
+        self.store.save(state)
+        msg = f"Projet réinitialisé à la phase '{to}'. Supprimé : {', '.join(removed) or 'aucun fichier'}."
+        return StepResult(status="succeeded", message=msg)
+
     def _run(self, state: ProjectState, agent_key: AgentKey, task) -> StepResult:
         agent = self.agents[agent_key.value]
 
@@ -293,6 +474,18 @@ class Orchestrator:
                 expected = ["03-structure.md", "04-research.md", "docs/decisions-questions.json"]
             else:
                 prompt = self.pipeline.render_prompt(agent_key, state, task, mode="prd")
+                expected = agent.expected_outputs
+        elif agent_key == AgentKey.ARCHITECT and agent.asks_questions:
+            # L'architecte écrit ses questions de configuration dans
+            # docs/architect-questions.json ; l'outil les pose à l'utilisateur
+            # puis l'architecte relit les réponses et livre l'architecture
+            # (mode init).
+            mode = self._architect_mode(state)
+            if mode == "config":
+                prompt = self.pipeline.render_prompt(agent_key, state, task, mode="config")
+                expected = ["docs/architect-questions.json"]
+            else:
+                prompt = self.pipeline.render_prompt(agent_key, state, task, mode="init")
                 expected = agent.expected_outputs
         else:
             prompt = self.pipeline.render_prompt(agent_key, state, task)
@@ -353,11 +546,14 @@ class Orchestrator:
         self.store.save(state)
 
         msg = self._message(agent_key, task, success, missing, mode)
+        produced = [p for p in expected if (Path(state.path) / p).exists()] if success else []
         return StepResult(
             status="succeeded" if success else "failed",
             agent=agent_key.value,
             task_id=task.id if task else None,
             message=msg,
+            summary=_summary_from_log(log_path) if success else "",
+            files=produced,
         )
 
     def _interactive(self, agent_key: AgentKey) -> bool:
@@ -393,7 +589,7 @@ class Orchestrator:
         except (TypeError, ValueError):
             return 1800
 
-    def _message(self, agent_key: AgentKey, task, success: bool, missing: list[str], pm_mode: Optional[str] = None) -> str:
+    def _message(self, agent_key: AgentKey, task, success: bool, missing: list[str], mode: Optional[str] = None) -> str:
         labels = {
             AgentKey.PM: "PRD",
             AgentKey.ARCHITECT: "Modules + architecture + scaffolding",
@@ -404,8 +600,8 @@ class Orchestrator:
         }
         if success:
             base = f"{labels[agent_key]} : OK"
-            if pm_mode:
-                base += f" (mode {pm_mode})"
+            if mode:
+                base += f" (mode {mode})"
             if task:
                 base += f" — {task.id} {task.title}"
             return base

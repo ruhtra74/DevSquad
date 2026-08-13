@@ -42,6 +42,13 @@ class Pipeline:
             return AgentKey.PM, None
         if phase == Phase.PRD_DONE:
             return AgentKey.ARCHITECT, None
+        if phase == Phase.ARCH_QUESTIONS:
+            # L'architecte poursuit : soit il pose de nouvelles questions
+            # (configuration projet), soit il livre l'architecture. Le mode exact
+            # est déterminé par les fichiers présents dans _run (voir
+            # _architect_mode). L'outil intercepte la phase ARCH_QUESTIONS pour
+            # poser les questions à l'utilisateur quand nécessaire.
+            return AgentKey.ARCHITECT, None
         if phase == Phase.ARCHITECTURE_DONE:
             return AgentKey.LEAD_MANAGER, None
         if phase in (Phase.PLANNING_DONE, Phase.DEVELOPMENT):
@@ -81,8 +88,18 @@ class Pipeline:
                 state.phase = Phase.QUESTIONS
         elif agent_key == AgentKey.ARCHITECT:
             if success:
-                state.phase = Phase.ARCHITECTURE_DONE
-                state.modules_path = "docs/MODULES.md"
+                # Après un run en mode config : si des questions ont été posées
+                # (fichier présent) mais pas encore répondues, on passe en
+                # ARCH_QUESTIONS pour que l'utilisateur réponde, puis l'architecte
+                # reprendra en mode init. Sinon (réponses déjà là ou aucune
+                # question nécessaire) : ARCHITECTURE_DONE.
+                questions = Path(state.path) / "docs" / "architect-questions.json"
+                answers = Path(state.path) / "docs" / "architect-answers.json"
+                if questions.exists() and not answers.exists():
+                    state.phase = Phase.ARCH_QUESTIONS
+                else:
+                    state.phase = Phase.ARCHITECTURE_DONE
+                    state.modules_path = "docs/MODULES.md"
         elif agent_key == AgentKey.LEAD_MANAGER:
             if success:
                 state.phase = Phase.PLANNING_DONE
