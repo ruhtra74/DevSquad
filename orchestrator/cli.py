@@ -64,16 +64,109 @@ def _report(step: StepResult) -> None:
 
 def _loop(orch: Orchestrator, project_id: str) -> None:
     while True:
-        step = orch.advance(project_id)
-        _report(step)
-        if step.status == "questions":
-            _collect_answers(orch, project_id)
-            continue
-        if step.status != "succeeded":
+        plan = orch.plan_batch(project_id, orch.max_parallel())
+        if isinstance(plan, StepResult):
+            _report(plan)
+            if plan.status == "questions":
+                _collect_answers(orch, project_id)
+                continue
             return
-        _review_step(orch, project_id, step)
-        if not typer.confirm("Continuer avec l'étape suivante ?", default=True):
+
+        # Proposition : si plusieurs tâches sont prêtes, on propose de les
+        # lancer en parallèle (l'utilisateur peut refuser → séquentiel).
+        if len(plan) > 1 and not _propose_parallel(orch, plan, orch.max_parallel()):
+            plan = plan[:1]
+
+        steps = orch.run_batch(project_id, plan)
+        stop = False
+        for step in steps:
+            _report(step)
+            if step.status == "succeeded":
+                # Les agents ne committent jamais : ils proposent, l'utilisateur valide.
+                if step.agent in ("coder", "devops") and step.task_id:
+                    _propose_commit(orch, project_id, step)
+                _review_step(orch, project_id, step)
+            else:
+                stop = True
+        if stop:
             return
+        if not typer.confirm("Continuer avec les prochaines étapes ?", default=True):
+            return
+
+
+def _propose_parallel(orch: Orchestrator, plan, max_parallel: int) -> bool:
+    """Présente les tâches prêtes et propose de les lancer en parallèle."""
+    typer.secho("")
+    typer.secho(f"Tâches prêtes à être lancées en parallèle (max {max_parallel}) :", fg="cyan", bold=True)
+    for agent_key, task in plan:
+        if task:
+            typer.echo(f"  - {task.id} ({task.assignee}) : {task.title}")
+        else:
+            typer.echo(f"  - {agent_key}")
+    return typer.confirm("Lancer ces tâches en parallèle ?", default=True)
+
+
+def _propose_commit(orch: Orchestrator, project_id: str, step: StepResult) -> None:
+    """Les agents ne committent jamais eux-mêmes : ils proposent un message de
+    commit dans leur rapport et c'est l'utilisateur qui valide — message proposé
+    ou personnalisé, commit réel ou non, push ou non."""
+    state = orch.store.get(project_id)
+    if state is None:
+        return
+    task = next((t for t in state.tasks if t.id == step.task_id), None)
+    report = Path(state.path) / "docs" / "reports" / f"{step.task_id}.md"
+    proposed = _extract_commit_message(report, task, step)
+
+    typer.secho("")
+    typer.secho(f"Message de commit proposé par l'agent ({step.task_id}) :", fg="cyan", bold=True)
+    typer.echo(f"  {proposed}")
+    choice = typer.prompt("Utiliser / personnaliser / ne pas committer ? [u/p/n]", default="u").strip().lower()
+    if choice.startswith("n"):
+        typer.secho("Pas de commit.", fg="bright_black")
+        return
+    if choice.startswith("p"):
+        custom = typer.prompt("Message de commit personnalisé", default=proposed).strip()
+        if not custom:
+            typer.secho("Commit annulé (message vide).", fg="yellow")
+            return
+        proposed = custom
+    do_push = typer.confirm("Pousser (git push) ?", default=False)
+    _run_commit(Path(state.path), proposed, do_push)
+
+
+def _extract_commit_message(report: Path, task, step: StepResult) -> str:
+    """Message de commit proposé par l'agent : ligne `COMMIT:` du rapport, sinon
+    un fallback à partir de la tâche."""
+    if report.exists():
+        for line in report.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("COMMIT:"):
+                msg = line.split(":", 1)[1].strip()
+                if msg:
+                    return msg
+    if task:
+        return f"{task.id}: {task.title}"
+    fallback = step.message or ""
+    return f"{step.task_id}: {fallback}".strip() if fallback else str(step.task_id or "travail")
+
+
+def _run_commit(path: Path, message: str, push: bool) -> None:
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=path, check=False, capture_output=True)
+        res = subprocess.run(["git", "commit", "-m", message], cwd=path, check=False, capture_output=True)
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout or b"").decode(errors="replace").strip()
+            typer.secho(f"Commit impossible : {err}", fg="yellow")
+            return
+        typer.secho(f"Commit créé : {message}", fg="green")
+        if push:
+            rp = subprocess.run(["git", "push"], cwd=path, check=False, capture_output=True)
+            if rp.returncode == 0:
+                typer.secho("Push effectué.", fg="green")
+            else:
+                err = (rp.stderr or rp.stdout or b"").decode(errors="replace").strip()
+                typer.secho(f"Push impossible : {err}", fg="yellow")
+    except OSError as e:
+        typer.secho(f"Git indisponible : {e}", fg="yellow")
 
 
 def _review_step(orch: Orchestrator, project_id: str, step: StepResult) -> None:
@@ -427,7 +520,10 @@ def advance(
     """Exécute une seule étape du pipeline."""
     orch = build_orchestrator()
     resolved_project_id = _resolve_project_id(project_id, project_id_option)
-    _report(orch.advance(resolved_project_id))
+    step = orch.advance(resolved_project_id)
+    _report(step)
+    if step.status == "succeeded" and step.agent in ("coder", "devops") and step.task_id:
+        _propose_commit(orch, resolved_project_id, step)
 
 
 @app.command()

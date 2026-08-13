@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..backends.base import RunSpec
+from ..backends.base import RunResult, RunSpec
 from ..backends.registry import BackendRegistry
 from .config import Config
 from .pipeline import DEVOPS_RESERVED_PATHS, Pipeline
@@ -28,6 +28,31 @@ class StepResult:
     message: str = ""
     summary: str = ""  # résumé rédigé par l'agent (dernière réponse)
     files: list = None  # fichiers produits par le run (livrables documentaires)
+
+
+@dataclass
+class RunPlan:
+    """Ce qu'il faut pour lancer un agent : backend, prompt, livrables, mode."""
+    agent_key: AgentKey
+    agent: object
+    backend: object
+    backend_name: str
+    prompt: str
+    mode: Optional[str]
+    expected: list
+    interactive: bool
+    timeout: Optional[int]
+
+
+@dataclass
+class PreparedRun:
+    """Run planifié : spec, log, run d'état et gate Coder prêt à exécuter."""
+    plan: RunPlan
+    task: object
+    run: AgentRun
+    log_path: str
+    spec: RunSpec
+    reserved_before: Optional[list] = None
 
 
 def slugify(text: str) -> str:
@@ -220,6 +245,7 @@ class Orchestrator:
     # ---- exécution du pipeline ----
 
     def advance(self, project_id: str) -> StepResult:
+        """Exécute une seule étape du pipeline (un seul agent)."""
         state = self.store.get(project_id)
         if state is None:
             return StepResult(status="noop", message=f"Projet inconnu : {project_id}")
@@ -235,11 +261,13 @@ class Orchestrator:
                 message=f"Tâche bloquée après 3 essais : {t.title}",
             )
 
-        agent_key, task = self.pipeline.next_step(state)
-        if agent_key is None:
+        items = self.pipeline.next_batch(state, 1)
+        if not items:
             if state.phase == Phase.COMPLETED:
                 return StepResult(status="completed", message="Pipeline terminé, projet livré.")
             return StepResult(status="noop", message=f"Phase actuelle : {state.phase.value}")
+
+        agent_key, task = items[0]
 
         # Phase QUESTIONS : si un fichier de questions existe sans réponses, l'outil
         # doit les poser à l'utilisateur (statut "questions"). Sinon on relance le PM.
@@ -263,6 +291,125 @@ class Orchestrator:
                 )
 
         return self._run(state, agent_key, task)
+
+    def plan_batch(self, project_id: str, max_parallel: int = 1):
+        """Calcule la prochaine liste d'actions (agent, tâche) à lancer.
+
+        Retourne une liste de couples (agent_key, task) si des travaux sont à
+        exécuter, ou un StepResult (noop / completed / blocked / questions) si
+        le pipeline est bloqué ou attend quelque chose.
+        """
+        state = self.store.get(project_id)
+        if state is None:
+            return StepResult(status="noop", message=f"Projet inconnu : {project_id}")
+
+        self._recover_stale_runs(state)
+
+        blocked = [t for t in state.tasks if t.status == TaskStatus.BLOCKED]
+        if blocked:
+            t = blocked[0]
+            return StepResult(
+                status="blocked",
+                task_id=t.id,
+                message=f"Tâche bloquée après 3 essais : {t.title}",
+            )
+
+        items = self.pipeline.next_batch(state, max_parallel)
+        if not items:
+            if state.phase == Phase.COMPLETED:
+                return StepResult(status="completed", message="Pipeline terminé, projet livré.")
+            return StepResult(status="noop", message=f"Phase actuelle : {state.phase.value}")
+
+        # Phase QUESTIONS : si un fichier de questions existe sans réponses, l'outil
+        # doit les poser à l'utilisateur (statut "questions"). Sinon on relance le PM.
+        if len(items) == 1 and items[0][0] == AgentKey.PM and state.phase == Phase.QUESTIONS:
+            pending = self._pending_questions_file(state)
+            if pending:
+                return StepResult(
+                    status="questions",
+                    agent=AgentKey.PM.value,
+                    message=f"Le Product Manager attend tes réponses ({pending}).",
+                )
+
+        # Phase ARCH_QUESTIONS : idem pour l'architecte (questions de configuration).
+        if len(items) == 1 and items[0][0] == AgentKey.ARCHITECT and state.phase == Phase.ARCH_QUESTIONS:
+            pending = self._pending_questions_file(state)
+            if pending:
+                return StepResult(
+                    status="questions",
+                    agent=AgentKey.ARCHITECT.value,
+                    message=f"L'architecte attend tes réponses ({pending}).",
+                )
+
+        return items
+
+    def run_batch(self, project_id: str, items) -> list[StepResult]:
+        """Exécute une liste d'actions (agent, tâche) en parallèle puis applique
+        les résultats. Les agents écrivent dans des fichiers disjoints (contrat
+        TASKS.json) et le commit est géré par l'utilisateur, pas par les agents."""
+        state = self.store.get(project_id)
+        if state is None:
+            return [StepResult(status="noop", message=f"Projet inconnu : {project_id}")]
+        self._recover_stale_runs(state)
+
+        parallel = len(items) > 1
+        prepared: list[tuple[Optional[PreparedRun], Optional[StepResult]]] = []
+        for agent_key, task in items:
+            if task is not None:
+                # Les tâches viennent de l'état chargé par plan_batch : on les
+                # re-résout dans l'état frais pour muter les bons objets.
+                fresh = next((t for t in state.tasks if t.id == task.id), None)
+                if fresh is None:
+                    prepared.append((None, StepResult(status="failed", agent=agent_key.value,
+                                                      message=f"Tâche introuvable : {task.id}")))
+                    continue
+                task = fresh
+            plan = self._plan(state, agent_key, task)
+            if isinstance(plan, StepResult):
+                prepared.append((None, plan))
+                continue
+            if parallel:
+                # En parallèle les agents tournent en arrière-plan (pas de
+                # question posée en direct ni de spinner concurrent).
+                plan.interactive = False
+                # En batch, les fichiers de zone DevOps sont légitimement
+                # créés par d'autres agents du même lot : le gate Coder
+                # (instantané avant / après) donnerait de faux positifs.
+                # La portée est déjà garantie par validate_tasks + prompts.
+            prep = self._prepare(state, plan, task)
+            if parallel and prep.reserved_before is not None:
+                prep.reserved_before = None
+            prepared.append((prep, None))
+
+        runnables = [p for p, _ in prepared if p is not None]
+        if parallel and runnables:
+            sys.stdout.write(f"\r→ {len(runnables)} agent(s) lancé(s) en parallèle...\n")
+            sys.stdout.flush()
+
+        results: dict[int, RunResult] = {}
+        if runnables:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=len(runnables)) as pool:
+                futures = {pool.submit(self._execute, p, spinner=False): p for p in runnables}
+                for fut in futures:
+                    p = futures[fut]
+                    results[id(p)] = fut.result()
+
+        steps: list[StepResult] = []
+        for p, err in prepared:
+            if err is not None:
+                steps.append(err)
+            else:
+                steps.append(self._finalize(state, p, results[id(p)]))
+        return steps
+
+    def max_parallel(self) -> int:
+        val = self.cfg.get("max_parallel")
+        try:
+            return max(1, int(val))
+        except (TypeError, ValueError):
+            return 1
 
     def _pending_questions_file(self, state: ProjectState) -> Optional[str]:
         """Renvoie le fichier de questions en attente de réponses, si présent."""
@@ -458,6 +605,16 @@ class Orchestrator:
         return StepResult(status="succeeded", message=msg)
 
     def _run(self, state: ProjectState, agent_key: AgentKey, task) -> StepResult:
+        plan = self._plan(state, agent_key, task)
+        if isinstance(plan, StepResult):
+            return plan
+        prep = self._prepare(state, plan, task)
+        result = self._execute(prep, spinner=True)
+        return self._finalize(state, prep, result)
+
+    def _plan(self, state: ProjectState, agent_key: AgentKey, task):
+        """Construit le plan d'un run : agent, backend, prompt, mode, livrables
+        attendus. Retourne un RunPlan, ou un StepResult en cas d'erreur."""
         agent = self.agents[agent_key.value]
 
         backend_name = self.cfg.get(f"backends.{agent_key.value}") or agent.backend
@@ -525,11 +682,26 @@ class Orchestrator:
             else:
                 expected = [p.format(task_id=task.id if task else "") for p in agent.expected_outputs]
 
+        interactive = self._interactive(agent_key)
+        timeout = self._timeout(agent_key)
+        return RunPlan(
+            agent_key=agent_key,
+            agent=agent,
+            backend=backend,
+            backend_name=backend_name,
+            prompt=prompt,
+            mode=mode,
+            expected=expected,
+            interactive=interactive,
+            timeout=timeout,
+        )
+
+    def _prepare(self, state: ProjectState, plan: "RunPlan", task) -> "PreparedRun":
         run = AgentRun(
-            agent=agent_key,
+            agent=plan.agent_key,
             phase=state.phase.value,
             status=RunStatus.RUNNING,
-            backend=backend_name,
+            backend=plan.backend_name,
             started_at=now(),
         )
         state.runs.append(run)
@@ -537,48 +709,60 @@ class Orchestrator:
 
         log_dir = Path(state.path) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = str(log_dir / f"{agent_key.value}-{len(state.runs):03d}.log")
+        log_path = str(log_dir / f"{plan.agent_key.value}-{len(state.runs):03d}.log")
 
-        interactive = self._interactive(agent_key)
-        timeout = self._timeout(agent_key)
         spec = RunSpec(
-            agent_key=agent_key.value,
-            prompt=prompt,
+            agent_key=plan.agent_key.value,
+            prompt=plan.prompt,
             cwd=state.path,
-            interactive=interactive,
-            timeout_seconds=timeout,
+            interactive=plan.interactive,
+            timeout_seconds=plan.timeout,
             auto_approve=bool(self.cfg.get("auto_approve")),
-            expected_outputs=expected,
-            capture=not interactive,
+            expected_outputs=plan.expected,
+            capture=not plan.interactive,
         )
 
-        label = f"Agent '{agent.name}' ({agent_key.value}) réfléchit..."
-        # Gate Coder : on mémorise l'état des chemins réservés à DevOps avant le
-        # run ; si le Coder en crée un pendant son travail, le run échouera.
-        reserved_before = self._reserved_snapshot(state) if (agent_key == AgentKey.CODER and task) else None
-        if not interactive:
+        # Gate Coder : instantané des chemins réservés à DevOps avant le run ;
+        # si le Coder en crée un pendant son travail, le run échouera.
+        reserved_before = self._reserved_snapshot(state) if (plan.agent_key == AgentKey.CODER and task) else None
+
+        return PreparedRun(
+            plan=plan, task=task, run=run, log_path=log_path, spec=spec, reserved_before=reserved_before,
+        )
+
+    def _execute(self, prep: "PreparedRun", spinner: bool = True) -> RunResult:
+        plan = prep.plan
+        if plan.interactive:
+            sys.stdout.write(f"\r{plan.agent.name} : mode interactif — vous pouvez répondre à ses questions.\n")
+            sys.stdout.flush()
+            return plan.backend.run(prep.spec, prep.log_path)
+        if spinner:
+            label = f"Agent '{plan.agent.name}' ({plan.agent_key.value}) réfléchit..."
             stop = threading.Event()
-            tail = _ActivityTail(log_path)
+            tail = _ActivityTail(prep.log_path)
             t = threading.Thread(target=_spinner, args=(stop, lambda: tail.current() or label), daemon=True)
             t.start()
             try:
-                result = backend.run(spec, log_path)
+                return plan.backend.run(prep.spec, prep.log_path)
             finally:
                 stop.set()
                 t.join()
-        else:
-            sys.stdout.write(f"\r{agent.name} : mode interactif — vous pouvez répondre à ses questions.\n")
-            sys.stdout.flush()
-            result = backend.run(spec, log_path)
+        return plan.backend.run(prep.spec, prep.log_path)
+
+    def _finalize(self, state: ProjectState, prep: "PreparedRun", result: RunResult) -> StepResult:
+        plan = prep.plan
+        task = prep.task
+        run = prep.run
+        agent_key = plan.agent_key
 
         run.finished_at = now()
         run.exit_code = result.exit_code
-        run.output_path = log_path
-        missing = [p for p in expected if not (Path(state.path) / p).exists()]
+        run.output_path = prep.log_path
+        missing = [p for p in plan.expected if not (Path(state.path) / p).exists()]
         success = result.success and not missing
         zone_touched = []
-        if success and reserved_before is not None:
-            zone_touched = self._new_devops_zone_files(state, reserved_before)
+        if success and prep.reserved_before is not None:
+            zone_touched = self._new_devops_zone_files(state, prep.reserved_before)
             if zone_touched:
                 success = False
         run.status = RunStatus.SUCCEEDED if success else RunStatus.FAILED
@@ -597,16 +781,16 @@ class Orchestrator:
             run.status = RunStatus.FAILED
         self.store.save(state)
 
-        msg = self._message(agent_key, task, success, missing, mode)
+        msg = self._message(agent_key, task, success, missing, plan.mode)
         if not success and run.error:
             msg = f"{msg} — {run.error}"
-        produced = [p for p in expected if (Path(state.path) / p).exists()] if success else []
+        produced = [p for p in plan.expected if (Path(state.path) / p).exists()] if success else []
         return StepResult(
             status="succeeded" if success else "failed",
             agent=agent_key.value,
             task_id=task.id if task else None,
             message=msg,
-            summary=_summary_from_log(log_path) if success else "",
+            summary=_summary_from_log(prep.log_path) if success else "",
             files=produced,
         )
 
