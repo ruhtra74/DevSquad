@@ -15,7 +15,7 @@ from typing import Optional
 from ..backends.base import RunSpec
 from ..backends.registry import BackendRegistry
 from .config import Config
-from .pipeline import Pipeline
+from .pipeline import DEVOPS_RESERVED_PATHS, Pipeline
 from .state import AgentKey, AgentRun, Phase, ProjectState, RunStatus, TaskStatus, now
 from .state_store import StateStore
 
@@ -280,6 +280,16 @@ class Orchestrator:
                 return rel
         return None
 
+    def _reserved_snapshot(self, state: ProjectState) -> list[str]:
+        """Chemins réservés à DevOps existants actuellement (gate Coder)."""
+        base = Path(state.path)
+        return [p for p in DEVOPS_RESERVED_PATHS if (base / p).exists()]
+
+    def _new_devops_zone_files(self, state: ProjectState, before: list[str]) -> list[str]:
+        """Chemins réservés à DevOps apparus depuis l'instantané (créés par le Coder)."""
+        base = Path(state.path)
+        return [p for p in DEVOPS_RESERVED_PATHS if (base / p).exists() and p not in before]
+
     def _recover_stale_runs(self, state: ProjectState) -> None:
         """Réinitialise les runs 'running' orphelins (processus tué en cours de route)."""
         changed = False
@@ -442,6 +452,7 @@ class Orchestrator:
                 t.report = None
 
         state.updated_at = now()
+        state.deployment_attempts = 0  # un reset revient toujours en arrière
         self.store.save(state)
         msg = f"Projet réinitialisé à la phase '{to}'. Supprimé : {', '.join(removed) or 'aucun fichier'}."
         return StepResult(status="succeeded", message=msg)
@@ -487,9 +498,32 @@ class Orchestrator:
             else:
                 prompt = self.pipeline.render_prompt(agent_key, state, task, mode="init")
                 expected = agent.expected_outputs
+        elif agent_key == AgentKey.TESTER:
+            # Le Tester est le gate : mode "devops" pour les tâches DevOps,
+            # mode "deployment" pour la revue du déploiement terminal.
+            if task and task.assignee == "devops":
+                mode = "devops"
+            elif task is None:
+                mode = "deployment"
+            prompt = self.pipeline.render_prompt(agent_key, state, task, mode=mode)
+            if task:
+                expected = [f"docs/reports/{task.id}-tests.md"]
+            else:
+                expected = ["docs/reports/deployment-tests.md"]
         else:
             prompt = self.pipeline.render_prompt(agent_key, state, task)
-            expected = [p.format(task_id=task.id if task else "") for p in agent.expected_outputs]
+            if task and agent_key == AgentKey.DEVOPS:
+                # Tâche DevOps pilotée : le livrable est la cible de la tâche
+                # (+ son rapport, pour que le Tester puisse le relire).
+                expected = [f"docs/reports/{task.id}.md"]
+                if task.target:
+                    expected.insert(0, task.target)
+            elif task and agent_key == AgentKey.CODER:
+                expected = [f"docs/reports/{task.id}.md"]
+                if task.target:
+                    expected.append(task.target)
+            else:
+                expected = [p.format(task_id=task.id if task else "") for p in agent.expected_outputs]
 
         run = AgentRun(
             agent=agent_key,
@@ -519,6 +553,9 @@ class Orchestrator:
         )
 
         label = f"Agent '{agent.name}' ({agent_key.value}) réfléchit..."
+        # Gate Coder : on mémorise l'état des chemins réservés à DevOps avant le
+        # run ; si le Coder en crée un pendant son travail, le run échouera.
+        reserved_before = self._reserved_snapshot(state) if (agent_key == AgentKey.CODER and task) else None
         if not interactive:
             stop = threading.Event()
             tail = _ActivityTail(log_path)
@@ -539,13 +576,30 @@ class Orchestrator:
         run.output_path = log_path
         missing = [p for p in expected if not (Path(state.path) / p).exists()]
         success = result.success and not missing
+        zone_touched = []
+        if success and reserved_before is not None:
+            zone_touched = self._new_devops_zone_files(state, reserved_before)
+            if zone_touched:
+                success = False
         run.status = RunStatus.SUCCEEDED if success else RunStatus.FAILED
-        run.error = result.error or (f"livrables manquants : {missing}" if missing else None)
+        run.error = (
+            result.error
+            or (f"livrables manquants : {missing}" if missing else None)
+            or (f"fichiers de zone DevOps créés par le Coder : {', '.join(zone_touched)}" if zone_touched else None)
+        )
 
-        self.pipeline.apply_result(state, agent_key, task, success)
+        pipeline_error = self.pipeline.apply_result(state, agent_key, task, success)
+        if success and pipeline_error:
+            # Ex : plan de travail invalide produit par le Lead Manager — on
+            # force l'échec pour que l'étape soit visible et relancée.
+            success = False
+            run.error = pipeline_error
+            run.status = RunStatus.FAILED
         self.store.save(state)
 
         msg = self._message(agent_key, task, success, missing, mode)
+        if not success and run.error:
+            msg = f"{msg} — {run.error}"
         produced = [p for p in expected if (Path(state.path) / p).exists()] if success else []
         return StepResult(
             status="succeeded" if success else "failed",

@@ -41,6 +41,13 @@ Pour chaque module de `MODULES.md`, décompose en **tâches atomiques** `TASK-NN
 - chaque tâche pointe son **fichier/dossier cible** (`target`) — deux tâches ne doivent jamais écrire dans les mêmes fichiers
 - ordre dicté par les **dépendances inter-modules** (on code d'abord ce que les autres consomment)
 - priorité P0/P1/P2
+- **`assignee`** : qui exécute la tâche — `coder` (défaut) pour l'implémentation, `devops` pour tout ce qui relève du déploiement
+
+### Répartition Coder / DevOps (IMPORTANT)
+- Une tâche **Coder** implémente du code métier ou technique. Sa cible ne doit **jamais** tomber dans une zone réservée à DevOps.
+- **Zones réservées à DevOps** (jamais une cible Coder) : `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.github/`, `.gitlab-ci.yml`, `Jenkinsfile`, `k8s/`, `helm/`, `deploy/`, `infra/`, `docs/DEPLOYMENT.md`, `docs/CHANGELOG.md`.
+- Une tâche **DevOps** (ex : "Dockeriser le backend", "Mettre en place le CI/CD", "Documenter le déploiement") a `assignee: "devops"` et sa cible est le livrable correspondant. Elle **dépend** des tâches Coder dont elle a besoin (ex : dockeriser le backend dépend de l'implémentation du backend).
+- Le Coder ne reçoit jamais une tâche de déploiement : c'est un contrat strict, l'orchestrateur le fait respecter.
 
 Écris `docs/TASKS.json` (version machine pour l'orchestrateur) avec ce schéma EXACT :
 
@@ -53,7 +60,17 @@ Pour chaque module de `MODULES.md`, décompose en **tâches atomiques** `TASK-NN
       "module": "Produits",
       "target": "backend/src/modules/produits/",
       "dependencies": [],
-      "priority": "P0"
+      "priority": "P0",
+      "assignee": "coder"
+    },
+    {
+      "id": "TASK-010",
+      "title": "Dockeriser le backend",
+      "module": "Déploiement",
+      "target": "Dockerfile",
+      "dependencies": ["TASK-001"],
+      "priority": "P0",
+      "assignee": "devops"
     }
   ]
 }
@@ -62,6 +79,10 @@ Pour chaque module de `MODULES.md`, décompose en **tâches atomiques** `TASK-NN
 - `id` : TASK-NNN (séquentiel, sans doublon)
 - `target` : chemin relatif du fichier/dossier que la tâche va créer ou modifier
 - `dependencies` : liste d'ids de tâches préalables (vide si aucune)
+- `assignee` : `coder` ou `devops` (omis = `coder`)
+
+### Si `docs/TASKS-validation-errors.md` existe
+Lis-le : le plan de travail précédent a été rejeté par l'orchestrateur. Corrige `docs/TASKS.json` (et `docs/TASKS.md`, `docs/BACKLOG.md`) pour lever **toutes** les violations, puis supprime ce fichier d'erreurs.
 
 # Règles
 - Ne modifie jamais `MODULES.md` : c'est le document de l'Architecte.

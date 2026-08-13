@@ -30,6 +30,7 @@ class Phase(str, enum.Enum):
     PLANNING_DONE = "planning_done"
     DEVELOPMENT = "development"
     DEPLOYMENT = "deployment"
+    DEPLOYMENT_REVIEW = "deployment_review"  # le Tester relit le déploiement terminal de DevOps
     COMPLETED = "completed"
 
 
@@ -54,6 +55,7 @@ class Task(BaseModel):
     module: str = ""
     target: Optional[str] = None
     dependencies: list[str] = Field(default_factory=list)
+    assignee: str = "coder"  # "coder" | "devops" : qui exécute la tâche (jamais le Tester, qui est un gate)
     status: TaskStatus = TaskStatus.TODO
     attempts: int = 0
     report: Optional[str] = None
@@ -82,5 +84,6 @@ class ProjectState(BaseModel):
     modules_path: Optional[str] = None
     tasks: list[Task] = Field(default_factory=list)
     runs: list[AgentRun] = Field(default_factory=list)
+    deployment_attempts: int = 0  # essais du run de déploiement terminal (DevOps)
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)

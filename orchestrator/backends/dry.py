@@ -21,6 +21,7 @@ _SAMPLE_TASKS = [
         "target": "backend/src/modules/produits/",
         "dependencies": [],
         "priority": "P0",
+        "assignee": "coder",
     },
     {
         "id": "TASK-002",
@@ -29,6 +30,16 @@ _SAMPLE_TASKS = [
         "target": "backend/src/modules/clients/",
         "dependencies": ["TASK-001"],
         "priority": "P0",
+        "assignee": "coder",
+    },
+    {
+        "id": "TASK-003",
+        "title": "Dockeriser le backend",
+        "module": "Déploiement",
+        "target": "Dockerfile",
+        "dependencies": ["TASK-001"],
+        "priority": "P0",
+        "assignee": "devops",
     },
 ]
 

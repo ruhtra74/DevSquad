@@ -19,6 +19,16 @@ Idée → Product Manager → Architecte → Lead Manager → (Coder ↔ Tester)
 
 **Boucle centrale** : Coder ↔ Tester tourne en boucle jusqu'à épuisement du backlog. Une tâche bloquée après 3 essais est marquée `BLOCKED`.
 
+## Revue entre étapes
+
+Après chaque agent réussi (et avant de passer la main au suivant), l'outil affiche :
+1. le **résumé** rédigé par l'agent (quelques lignes : contexte, décisions clés, fichiers produits),
+2. la liste **numérotée** des fichiers de documentation créés,
+3. l'invitation à **voir un fichier** (numéro) — ouvert avec `$EDITOR` (ou `$VISUAL`) si défini, sinon `less`/`cat`,
+4. la confirmation de **passer à l'étape suivante** (Entrée pour continuer).
+
+Cela permet de vérifier le travail d'un agent avant qu'il ne transmette au suivant. Désactivable en répondant non à la confirmation finale.
+
 ## Installation
 
 ```bash

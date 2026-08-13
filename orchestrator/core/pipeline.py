@@ -13,6 +13,28 @@ from jinja2 import Environment, FileSystemLoader
 from .state import AgentKey, Phase, ProjectState, Task, TaskStatus, now
 
 
+# Chemins réservés à l'agent DevOps : le Coder ne doit jamais les créer/modifier.
+DEVOPS_RESERVED_PATHS = [
+    "Dockerfile", ".dockerignore",
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+    ".github", ".gitlab-ci.yml", "Jenkinsfile",
+    "docs/DEPLOYMENT.md", "docs/CHANGELOG.md",
+    "k8s", "helm", "deploy", "infra",
+]
+
+
+def in_devops_zone(rel: str) -> bool:
+    """Vrai si le chemin relatif tombe dans une zone réservée à DevOps."""
+    rel = (rel or "").strip().rstrip("/")
+    if not rel:
+        return False
+    for p in DEVOPS_RESERVED_PATHS:
+        pn = p.rstrip("/")
+        if rel == pn or rel.startswith(pn + "/"):
+            return True
+    return False
+
+
 class Pipeline:
     def __init__(self, agents: dict, prompts_dir: Path):
         self.agents = agents
@@ -55,15 +77,21 @@ class Pipeline:
             in_flight = [t for t in state.tasks if t.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_TEST)]
             if in_flight:
                 t = in_flight[0]
-                return (AgentKey.TESTER if t.status == TaskStatus.IN_TEST else AgentKey.CODER), t
+                if t.status == TaskStatus.IN_TEST:
+                    return AgentKey.TESTER, t
+                # La tâche en cours est exécutée par son assignee : Coder ou DevOps.
+                return (AgentKey.DEVOPS if t.assignee == "devops" else AgentKey.CODER), t
             task = self._next_task(state)
             if task:
-                return AgentKey.CODER, task
+                return (AgentKey.DEVOPS if task.assignee == "devops" else AgentKey.CODER), task
             if state.tasks and all(t.status == TaskStatus.DONE for t in state.tasks):
                 return AgentKey.DEVOPS, None
             return None, None
         if phase == Phase.DEPLOYMENT:
             return AgentKey.DEVOPS, None
+        if phase == Phase.DEPLOYMENT_REVIEW:
+            # Le Tester relit le déploiement terminal de DevOps avant la livraison.
+            return AgentKey.TESTER, None
         return None, None
 
     def _next_task(self, state: ProjectState) -> Optional[Task]:
@@ -73,11 +101,17 @@ class Pipeline:
                 return t
         return None
 
-    def apply_result(self, state: ProjectState, agent_key: AgentKey, task: Optional[Task], success: bool) -> None:
+    def apply_result(self, state: ProjectState, agent_key: AgentKey, task: Optional[Task], success: bool) -> Optional[str]:
+        """Applique le résultat d'un run.
+
+        Retourne un message d'erreur si le run doit être considéré en échec
+        malgré la réussite de l'agent (ex : TASKS.json invalide produit par le
+        Lead Manager), None sinon.
+        """
         if agent_key == AgentKey.PM:
             if not success:
                 state.updated_at = now()
-                return
+                return None
             # Entre vue terminée (02-interview.md) mais PRD pas encore livré :
             # on passe en QUESTIONS pour que l'utilisateur confirme, puis le PM
             # relancera en livraison. Si le PRD existe déjà : PRD_DONE.
@@ -102,9 +136,19 @@ class Pipeline:
                     state.modules_path = "docs/MODULES.md"
         elif agent_key == AgentKey.LEAD_MANAGER:
             if success:
-                state.phase = Phase.PLANNING_DONE
                 self._load_tasks(state)
-        elif agent_key == AgentKey.CODER and task:
+                violations = self.validate_tasks(state)
+                if violations:
+                    self._write_validation_errors(state, violations)
+                    # On ne passe pas en PLANNING_DONE : le Lead Manager sera
+                    # relancé et corrigera en lisant le fichier d'erreurs.
+                    state.phase = Phase.ARCHITECTURE_DONE
+                    state.updated_at = now()
+                    return f"Plan de travail invalide ({len(violations)} problème(s)) — voir docs/TASKS-validation-errors.md"
+                state.phase = Phase.PLANNING_DONE
+        elif agent_key in (AgentKey.CODER, AgentKey.DEVOPS) and task:
+            # Tâche exécutée par son assignee (Coder ou DevOps) : même boucle,
+            # le Tester fait le gate pour les deux.
             task.attempts += 1
             if success:
                 task.status = TaskStatus.IN_TEST
@@ -123,9 +167,22 @@ class Pipeline:
                 task.status = TaskStatus.BLOCKED
             if state.tasks and all(t.status == TaskStatus.DONE for t in state.tasks):
                 state.phase = Phase.DEPLOYMENT
-        elif agent_key == AgentKey.DEVOPS and success:
-            state.phase = Phase.COMPLETED
+        elif agent_key == AgentKey.DEVOPS:
+            # Run terminal de déploiement (plus de tâches en attente).
+            if success:
+                state.phase = Phase.DEPLOYMENT_REVIEW
+            else:
+                state.deployment_attempts += 1
+        elif agent_key == AgentKey.TESTER:
+            # Revue finale du déploiement terminal par le Tester.
+            verdict = self._deployment_verdict(state)
+            if verdict == "PASS":
+                state.phase = Phase.COMPLETED
+            else:
+                state.phase = Phase.DEPLOYMENT
+                state.deployment_attempts += 1
         state.updated_at = now()
+        return None
 
     def _load_tasks(self, state: ProjectState) -> None:
         path = Path(state.path) / "docs" / "TASKS.json"
@@ -142,12 +199,60 @@ class Pipeline:
                 module=item.get("module", ""),
                 target=item.get("target"),
                 dependencies=item.get("dependencies", []),
+                assignee=item.get("assignee", "coder"),
             )
             for item in data.get("tasks", [])
         ]
 
+    def validate_tasks(self, state: ProjectState) -> list[str]:
+        """Vérifie les contraintes du plan de travail produit par le Lead Manager.
+
+        Retourne la liste des violations (vide si le plan est valide) :
+        - ids uniques et non vides
+        - assignee ∈ {coder, devops}
+        - une tâche Coder ne cible jamais une zone réservée à DevOps
+        - les dépendances référencent des tâches existantes
+        """
+        violations: list[str] = []
+        ids = {t.id for t in state.tasks}
+        seen: set[str] = set()
+        for t in state.tasks:
+            if not t.id or t.id in seen:
+                violations.append(f"id manquant ou dupliqué : {t.id!r}")
+            seen.add(t.id)
+            if t.assignee not in ("coder", "devops"):
+                violations.append(f"{t.id}: assignee invalide {t.assignee!r} (valeurs : coder, devops)")
+            if t.assignee == "coder" and in_devops_zone(t.target or ""):
+                violations.append(f"{t.id}: tâche Coder ciblant la zone DevOps réservée ({t.target}) — assigne-la à 'devops'")
+            for dep in t.dependencies:
+                if dep not in ids:
+                    violations.append(f"{t.id}: dépendance inconnue {dep!r}")
+        return violations
+
+    def _write_validation_errors(self, state: ProjectState, violations: list[str]) -> None:
+        docs = Path(state.path) / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        content = [
+            "# Erreurs de validation du plan de travail",
+            "",
+            "Le plan de travail produit ne respecte pas les contrats. Corrige",
+            "docs/TASKS.json puis réécris docs/TASKS.md et docs/BACKLOG.md en conséquence.",
+            "",
+            "## Violations",
+            "",
+        ] + [f"- {v}" for v in violations]
+        (docs / "TASKS-validation-errors.md").write_text("\n".join(content) + "\n", encoding="utf-8")
+
     def _verdict(self, state: ProjectState, task: Task) -> Optional[str]:
         report = Path(state.path) / "docs" / "reports" / f"{task.id}-tests.md"
+        return self._read_verdict(report)
+
+    def _deployment_verdict(self, state: ProjectState) -> Optional[str]:
+        report = Path(state.path) / "docs" / "reports" / "deployment-tests.md"
+        return self._read_verdict(report)
+
+    @staticmethod
+    def _read_verdict(report: Path) -> Optional[str]:
         if not report.exists():
             return None
         for line in report.read_text().splitlines():
